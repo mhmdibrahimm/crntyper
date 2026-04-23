@@ -88,11 +88,6 @@ func (s *CRNStore) Count() int {
 }
 
 func main() {
-	if wantsVersion(os.Args[1:]) {
-		fmt.Println(fullVersion())
-		return
-	}
-
 	runtime.LockOSThread()
 	store := NewCRNStore()
 	_ = store.Load()
