@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	"os"
-	"path/filepath"
 	"runtime"
 	"sync"
 
@@ -17,17 +16,8 @@ import (
 	hook "github.com/robotn/gohook"
 )
 
-var crnFile string
-
-func init() {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		fmt.Println("⚠️  could not get home dir, using local cwd:", err)
-		crnFile = "crns.txt"
-	} else {
-		crnFile = filepath.Join(home, "Documents", "crns.txt")
-	}
-}
+var platform = currentPlatformSpec()
+var crnFile = platform.CRNFile
 
 type CRNStore struct {
 	mu   sync.RWMutex
@@ -98,6 +88,11 @@ func (s *CRNStore) Count() int {
 }
 
 func main() {
+	if wantsVersion(os.Args[1:]) {
+		fmt.Println(fullVersion())
+		return
+	}
+
 	runtime.LockOSThread()
 	store := NewCRNStore()
 	_ = store.Load()
@@ -120,33 +115,37 @@ func main() {
 		return loaded
 	}
 
-	// robot goroutine
-	go func() {
-		runtime.LockOSThread()
-		defer runtime.UnlockOSThread()
-		for crn := range crnCh {
-			robotgo.TypeStr(crn)
-			robotgo.KeyTap("tab")
-		}
-	}()
-
-	go func() {
-		events := hook.Start()
-		defer hook.End()
-		for ev := range events {
-			// Backspace on macOS → Keychar 127
-			if ev.Kind == hook.KeyDown && ev.Keychar == 8 && ev.Keycode == 0 && isLoaded() {
-				for _, crn := range store.Snapshot() {
-					crnCh <- crn
-				}
-				unloadCh <- struct{}{}
+	if platform.Supported {
+		// robot goroutine
+		go func() {
+			runtime.LockOSThread()
+			defer runtime.UnlockOSThread()
+			for crn := range crnCh {
+				robotgo.TypeStr(crn)
+				robotgo.KeyTap("tab")
 			}
-		}
-		close(crnCh)
-	}()
+		}()
+
+		go func() {
+			events := hook.Start()
+			defer hook.End()
+			for ev := range events {
+				if platform.MatchesTrigger(ev) && isLoaded() {
+					for _, crn := range store.Snapshot() {
+						crnCh <- crn
+					}
+					unloadCh <- struct{}{}
+				}
+			}
+			close(crnCh)
+		}()
+	}
 
 	a := app.New()
-	w := a.NewWindow("CRN Typer")
+	w := a.NewWindow(appTitle())
+	if platform.Supported {
+		w.SetTitle(appTitle() + " - " + platform.Name)
+	}
 	w.Resize(fyne.NewSize(360, 300))
 
 	status := widget.NewLabel("")
@@ -187,6 +186,11 @@ func main() {
 
 	var loadBtn *widget.Button
 	loadBtn = widget.NewButton("Load", func() {
+		if !platform.Supported {
+			status.SetText(platform.ReadyMessage())
+			return
+		}
+
 		// gather
 		var list []string
 		for _, e := range entries {
@@ -201,14 +205,17 @@ func main() {
 		}
 		setLoaded(true)
 		loadBtn.SetText("Unload")
-		status.SetText(fmt.Sprintf("✅ Loaded %d CRNs. Press Backspace.", len(list)))
+		status.SetText(fmt.Sprintf("✅ Loaded %d CRNs. Press %s.", len(list), platform.TriggerName))
 	})
+	if !platform.Supported {
+		loadBtn.Disable()
+	}
 
 	go func() {
 		for range unloadCh {
 			setLoaded(false)
 			loadBtn.SetText("Load")
-			status.SetText("Press Load to import " + crnFile)
+			status.SetText(platform.ReadyMessage())
 		}
 	}()
 
@@ -230,7 +237,7 @@ func main() {
 	}
 	addEntry()
 
-	status.SetText("Press Load to import " + crnFile)
+	status.SetText(platform.ReadyMessage())
 
 	w.SetContent(container.NewVBox(
 		status,
